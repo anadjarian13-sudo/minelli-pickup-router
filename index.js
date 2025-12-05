@@ -110,6 +110,6 @@ app.post("/webhooks/orders-create", async (req, res) => {
   }
 });
 
-app.listen(process.env.PORT || 3000, () =>
-  console.log("Running pickup router")
-);
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Running pickup router on port ${PORT}`));
+
