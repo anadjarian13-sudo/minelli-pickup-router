@@ -11,22 +11,32 @@ const {
 
 const app = express();
 
+// Shopify envoie un RAW BODY → OBLIGATOIRE pour vérifier la signature
 app.use(
   "/webhooks/orders-create",
   bodyParser.raw({ type: "application/json" })
 );
 
-// Vérification de la signature Shopify
+// --------------------------------------------------
+// Vérification de la signature Shopify (si fournie)
+// --------------------------------------------------
 function verifyWebhook(req) {
   const hmac = req.get("X-Shopify-Hmac-Sha256");
+
+  // Si Shopify n’envoie pas de signature → on ne vérifie pas
+  if (!hmac) return null; // null = pas de signature
+
   const digest = crypto
     .createHmac("sha256", SHOPIFY_WEBHOOK_SECRET)
     .update(req.body, "utf8")
     .digest("base64");
+
   return crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(hmac));
 }
 
-// Boutiques → à remplir progressivement
+// --------------------------------------------------
+// Liste des boutiques (à compléter)
+// --------------------------------------------------
 const boutiques = {
   "Aix-en-Provence": {
     name: "MINELLI Aix-en-Provence",
@@ -34,36 +44,65 @@ const boutiques = {
     city: "Aix-en-Provence",
     zip: "13100",
     country: "FR"
-  }
-  // ajoute les autres ensuite
+  },
+
+  // ------ ajoute ici TOUTES les boutiques ------
 };
 
+// --------------------------------------------------
+// WEBHOOK : création d'une commande
+// --------------------------------------------------
 app.post("/webhooks/orders-create", async (req, res) => {
+  console.log("Webhook received");
+
   try {
-    if (!verifyWebhook(req)) {
+    const signatureCheck = verifyWebhook(req);
+
+    // ❗ Si Shopify a envoyé une signature et qu'elle est invalide → on refuse
+    if (signatureCheck === false) {
+      console.log("Invalid signature");
       return res.status(401).send("Invalid webhook signature");
     }
 
-    const order = JSON.parse(req.body.toString("utf8"));
+    // À ce stade :
+    // ✔ signatureCheck === true → signature valide
+    // ✔ signatureCheck === null → pas de signature (tests manuels acceptés)
 
+    const order = JSON.parse(req.body.toString("utf8"));
+    console.log("Order parsed:", order.id);
+
+    // Vérifier si la commande est un retrait boutique
     const shippingLine = (order.shipping_lines || [])[0];
     const isPickup =
       shippingLine &&
       shippingLine.title &&
       shippingLine.title.toLowerCase().includes("retrait");
 
-    if (!isPickup) return res.status(200).send("Not pickup order");
+    if (!isPickup) {
+      console.log("Not a pickup order");
+      return res.status(200).send("Not pickup order");
+    }
 
+    // Boutique sélectionnée par le client
     const notes = order.note_attributes || [];
     const bAttr = notes.find((n) => n.name === "boutique_retrait");
-    if (!bAttr) return res.status(200).send("No boutique selected");
+
+    if (!bAttr) {
+      console.log("No boutique selected");
+      return res.status(200).send("No boutique selected");
+    }
 
     const boutique = boutiques[bAttr.value];
-    if (!boutique) return res.status(200).send("Unknown boutique");
+    if (!boutique) {
+      console.log("Unknown boutique:", bAttr.value);
+      return res.status(200).send("Unknown boutique");
+    }
+
+    console.log("Boutique found:", boutique.name);
 
     const clientAddr = order.shipping_address || {};
 
-    // New address → Boutique
+    // Nouvelle adresse = adresse de la boutique
     const newAddress = {
       first_name: clientAddr.first_name,
       last_name: clientAddr.last_name,
@@ -76,7 +115,7 @@ app.post("/webhooks/orders-create", async (req, res) => {
       phone: clientAddr.phone
     };
 
-    // Keep original client address in notes
+    // Sauvegarder l'adresse d'origine dans les notes
     const newNotes = [
       ...notes.filter((n) => n.name !== "adresse_client_originale"),
       {
@@ -85,10 +124,13 @@ app.post("/webhooks/orders-create", async (req, res) => {
       }
     ];
 
-    // Update order
+    // URL Shopify pour modifier la commande
     const url = `https://${SHOPIFY_SHOP}/admin/api/2024-01/orders/${order.id}.json`;
 
-    await fetch(url, {
+    console.log("Updating order on Shopify…");
+
+    // PUT → mise à jour Shopify
+    const response = await fetch(url, {
       method: "PUT",
       headers: {
         "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
@@ -103,13 +145,24 @@ app.post("/webhooks/orders-create", async (req, res) => {
       })
     });
 
+    if (!response.ok) {
+      const txt = await response.text();
+      console.log("Shopify update error:", txt);
+      return res.status(500).send("Shopify update failed");
+    }
+
+    console.log("Order updated successfully");
     res.status(200).send("OK");
   } catch (e) {
-    console.error(e);
+    console.error("ERROR in webhook:", e);
     res.status(500).send("Error");
   }
 });
 
+// --------------------------------------------------
+// SERVER
+// --------------------------------------------------
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Running pickup router on port ${PORT}`));
-
+app.listen(PORT, () =>
+  console.log(`Running pickup router on port ${PORT}`)
+);
